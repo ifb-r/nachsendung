@@ -65,6 +65,10 @@
   #toast.error   { background: var(--warn); }
   .spinner { display: inline-block; width: 16px; height: 16px; border: 2px solid rgba(255,255,255,.4); border-top-color: #fff; border-radius: 50%; animation: spin .7s linear infinite; }
   @keyframes spin { to { transform: rotate(360deg); } }
+  #dlgBackdrop { position: fixed; inset: 0; background: rgba(0,0,0,.35); display: none; align-items: center; justify-content: center; z-index: 1000; }
+  #dlgBackdrop.open { display: flex; }
+  #dlgBox { background: #fff; border-radius: var(--radius); box-shadow: 0 8px 28px rgba(0,0,0,.25); padding: 22px 24px; max-width: 440px; width: calc(100% - 32px); }
+  #dlgText { font-size: 14px; line-height: 1.5; margin-bottom: 18px; white-space: pre-line; }
   @media (max-width: 600px) { .form-row { flex-direction: column; } }
 </style>
 </head>
@@ -185,6 +189,15 @@ const CONFIG = { workerBase: 'https://nachsendung-api.andrea-reichert.workers.de
 
 </main>
 <div id="toast"></div>
+<div id="dlgBackdrop">
+  <div id="dlgBox" role="dialog" aria-modal="true">
+    <div id="dlgText"></div>
+    <div class="action-bar" style="margin-top:0">
+      <button class="btn btn-ghost" id="dlgCancel">Abbrechen</button>
+      <button class="btn btn-primary" id="dlgOk">OK</button>
+    </div>
+  </div>
+</div>
 
 <script>
 'use strict';
@@ -276,8 +289,8 @@ function refreshHighlight(items, idx) {
 
 function seminarLabel(s) { return `${s.no} · ${s.description || ''}`; }
 
-function selectSeminar(idx) {
-  if (hasChanges() && !confirm('Es gibt nicht gespeicherte Änderungen. Trotzdem ein anderes Seminar wählen?')) {
+async function selectSeminar(idx) {
+  if (hasChanges() && !(await askConfirm('Es gibt nicht gespeicherte Änderungen. Trotzdem ein anderes Seminar wählen?', 'Seminar wechseln'))) {
     document.getElementById('seminarDropdown').classList.remove('open');
     document.getElementById('seminarSearchInput').value = seminarLabel(selectedSeminar);
     return;
@@ -374,6 +387,7 @@ function applyState(task) {
   lines = (task?.reshipmentPlanningLines || []).map(l => ({
     planningLineNo: l.lineNo, no: l.itemNo, description: l.description || '', unit: l.unitOfMeasureCode || '',
     origQty: l.quantity, quantity: l.quantity, locked: !!l.locked, lockReason: l.lockReason || '', deleted: false,
+    pickState: l.pickState || '', stock: l.stockAtLocation || 0, location: l.locationCode || '',
   }));
   const info = document.getElementById('lastEditInfo');
   info.textContent = task && task.lastWebEditor
@@ -391,11 +405,22 @@ function renderPickInfo(task) {
   const openPicks = task?.openPickNos || '';
   if (!task) { info.textContent = ''; btn.style.display = 'none'; return; }
 
+  // Die erste Lagerkommissionierung des Seminars entsteht im normalen Ablauf, nicht über die Nachsendung.
+  if (!task.pickAllowed) {
+    info.textContent = 'Für dieses Seminar gibt es noch keine Lagerkommissionierung. Die Nachsendung kommt automatisch mit der ersten Lagerkommissionierung des Seminars ins Lager.';
+    btn.style.display = 'none';
+    return;
+  }
+
+  const noStock = lines.filter(l => !l.locked && (l.pickState === 'noStock' || l.pickState === 'partialStock')).length;
   const pickText = openPicks ? `Offene Lagerkommissionierung: ${openPicks}.` : 'Keine offene Lagerkommissionierung.';
   const pendingText = pending
     ? ` ${pending} Artikel ${pending === 1 ? 'steht' : 'stehen'} noch auf keiner Lagerkommissionierung – der Nachtlauf ${openPicks ? 'ergänzt die offene' : 'erstellt eine neue'}, oder du stößt es jetzt an.`
     : ' Alle Artikel der Nachsendung stehen auf einer Lagerkommissionierung.';
-  info.textContent = pickText + pendingText;
+  const stockText = noStock
+    ? ` Achtung: Für ${noStock} Artikel fehlt Bestand am Lagerort; sie kommen erst auf die Lagerkommissionierung, wenn Bestand da ist. Bitte kläre das mit dem Lager.`
+    : '';
+  info.textContent = pickText + pendingText + stockText;
 
   btn.style.display = pending ? '' : 'none';
   btn.innerHTML = openPicks ? '📦 Lagerkommissionierung jetzt aktualisieren' : '📦 Lagerkommissionierung jetzt erstellen';
@@ -407,7 +432,7 @@ async function requestPick() {
   const question = openPicks
     ? `Die offene Lagerkommissionierung ${openPicks} wird jetzt neu aufgebaut und um die Nachsendung ergänzt. Danach können diese Artikel hier nicht mehr geändert werden. Fortfahren?`
     : 'Für die Nachsendung wird jetzt eine eigene Lagerkommissionierung erstellt. Danach können diese Artikel hier nicht mehr geändert werden. Fortfahren?';
-  if (!confirm(question)) return;
+  if (!(await askConfirm(question, openPicks ? 'Aktualisieren' : 'Erstellen'))) return;
 
   const btn = document.getElementById('btnPick');
   const origHtml = btn.innerHTML;
@@ -416,7 +441,18 @@ async function requestPick() {
   try {
     const data = await wPost(`/seminars/${encodeURIComponent(selectedSeminar.no)}/pick`, {});
     applyState(data.task);
-    showToast(`✓ Lagerkommissionierung ${data.task?.openPickNos || ''} ist auf dem Stand.`, 'success');
+    const pending = data.task?.pendingPickLines || 0;
+    const pickNos = data.task?.openPickNos || '';
+    const missing = lines.filter(l => !l.locked && (l.pickState === 'noStock' || l.pickState === 'partialStock'))
+      .map(l => `${l.no} (Bestand ${l.location}: ${l.stock})`);
+    if (!pickNos)
+      showToast(`Es wurde keine Lagerkommissionierung erstellt, weil am Lagerort Bestand fehlt: ${missing.join(', ')}. Bitte wende dich an das Lager.`, 'error');
+    else if (missing.length)
+      showToast(`Lagerkommissionierung ${pickNos}: Wegen fehlendem Bestand nicht übernommen: ${missing.join(', ')}. Bitte wende dich an das Lager.`, 'error');
+    else if (pending > 0)
+      showToast(`Lagerkommissionierung ${pickNos}: ${pending} Artikel konnten nicht übernommen werden. Bitte wende dich an das Lager.`, 'error');
+    else
+      showToast(`✓ Lagerkommissionierung ${pickNos} ist auf dem Stand.`, 'success');
   } catch (e) {
     btn.innerHTML = origHtml;
     showToast('Fehler: ' + e.message, 'error');
@@ -470,9 +506,31 @@ function getChanges() {
 
 function hasChanges() { return selectedSeminar !== null && getChanges().length > 0; }
 
-function discardChanges() {
-  if (!confirm('Alle nicht gespeicherten Änderungen verwerfen?')) return;
+async function discardChanges() {
+  if (!(await askConfirm('Alle nicht gespeicherten Änderungen verwerfen?', 'Verwerfen'))) return;
   applyState(currentTask);
+}
+
+// Eigener Dialog statt confirm(): der Browser setzt dort „Auf … wird Folgendes angezeigt“ davor.
+function askConfirm(text, okLabel = 'OK') {
+  return new Promise(resolve => {
+    const backdrop = document.getElementById('dlgBackdrop');
+    const ok = document.getElementById('dlgOk');
+    const cancel = document.getElementById('dlgCancel');
+    document.getElementById('dlgText').textContent = text;
+    ok.textContent = okLabel;
+    const close = result => {
+      backdrop.classList.remove('open');
+      ok.onclick = cancel.onclick = backdrop.onclick = document.onkeydown = null;
+      resolve(result);
+    };
+    ok.onclick = () => close(true);
+    cancel.onclick = () => close(false);
+    backdrop.onclick = e => { if (e.target === backdrop) close(false); };
+    document.onkeydown = e => { if (e.key === 'Escape') close(false); };
+    backdrop.classList.add('open');
+    ok.focus();
+  });
 }
 
 function renderLines() {
@@ -491,6 +549,12 @@ function renderLines() {
       <tbody>
         ${lines.map((l, i) => {
           let status = 'gespeichert';
+          if (l.pickState === 'noStock')
+            status = `<span style="color:var(--warn)">⚠ kein Bestand am Lagerort ${esc(l.location)} – nicht auf Lagerkomm.</span>`;
+          else if (l.pickState === 'partialStock')
+            status = `<span style="color:var(--warn)">⚠ nur ${esc(l.stock)} Stk. Bestand am Lagerort ${esc(l.location)} – nicht auf Lagerkomm.</span>`;
+          else if (l.pickState === 'pending')
+            status = currentTask?.pickAllowed ? 'gespeichert, noch nicht auf Lagerkomm.' : 'gespeichert, kommt mit der ersten Lagerkomm.';
           if (l.locked) status = `🔒 ${esc(LOCK_TEXT[l.lockReason] || 'gesperrt')}`;
           else if (l.planningLineNo === 0) status = '<span style="color:var(--success)">neu</span>';
           else if (l.deleted) status = '<span style="color:var(--warn)">wird gelöscht</span>';
@@ -598,7 +662,7 @@ function showToast(msg, type = '') {
   el.textContent = msg;
   el.className = 'show ' + type;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { el.className = ''; }, 4500);
+  toastTimer = setTimeout(() => { el.className = ''; }, type === 'error' ? 9000 : 4500);
 }
 
 function esc(str) {
