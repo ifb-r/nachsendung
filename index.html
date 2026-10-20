@@ -413,16 +413,20 @@ function renderPickInfo(task) {
   }
 
   const noStock = lines.filter(l => !l.locked && (l.pickState === 'noStock' || l.pickState === 'partialStock')).length;
+  // Nur Artikel mit Bestand kann eine Aktualisierung jetzt übernehmen.
+  const ready = lines.filter(l => !l.locked && l.pickState === 'pending').length;
   const pickText = openPicks ? `Offene Lagerkommissionierung: ${openPicks}.` : 'Keine offene Lagerkommissionierung.';
-  const pendingText = pending
-    ? ` ${pending} Artikel ${pending === 1 ? 'steht' : 'stehen'} noch auf keiner Lagerkommissionierung – der Nachtlauf ${openPicks ? 'ergänzt die offene' : 'erstellt eine neue'}, oder du stößt es jetzt an.`
-    : ' Alle Artikel der Nachsendung stehen auf einer Lagerkommissionierung.';
+  let pendingText = '';
+  if (ready)
+    pendingText = ` ${ready} Artikel ${ready === 1 ? 'steht' : 'stehen'} noch auf keiner Lagerkommissionierung – der Nachtlauf ${openPicks ? 'ergänzt die offene' : 'erstellt eine neue'}, oder du stößt es jetzt an.`;
+  else if (!pending)
+    pendingText = ' Alle Artikel der Nachsendung stehen auf einer Lagerkommissionierung.';
   const stockText = noStock
-    ? ` Achtung: Für ${noStock} Artikel fehlt Bestand am Lagerort; sie kommen erst auf die Lagerkommissionierung, wenn Bestand da ist. Bitte kläre das mit dem Lager.`
+    ? ` Achtung: Für ${noStock} Artikel fehlt freier Bestand am Lagerort. Der Nachtlauf übernimmt sie, sobald genug Bestand frei ist. Bitte kläre das mit dem Lager.`
     : '';
   info.textContent = pickText + pendingText + stockText;
 
-  btn.style.display = pending ? '' : 'none';
+  btn.style.display = ready ? '' : 'none';
   btn.innerHTML = openPicks ? '📦 Lagerkommissionierung jetzt aktualisieren' : '📦 Lagerkommissionierung jetzt erstellen';
 }
 
@@ -430,7 +434,7 @@ async function requestPick() {
   if (hasChanges()) { showToast('Bitte speichere oder verwirf zuerst deine Änderungen.', 'error'); return; }
   const openPicks = currentTask?.openPickNos || '';
   const question = openPicks
-    ? `Die offene Lagerkommissionierung ${openPicks} wird jetzt neu aufgebaut und um die Nachsendung ergänzt. Danach können diese Artikel hier nicht mehr geändert werden. Fortfahren?`
+    ? `Die offene Lagerkommissionierung ${openPicks} wird jetzt neu aufgebaut und um die Nachsendung ergänzt; sie bekommt dabei eine neue Nummer. Danach können diese Artikel hier nicht mehr geändert werden. Fortfahren?`
     : 'Für die Nachsendung wird jetzt eine eigene Lagerkommissionierung erstellt. Danach können diese Artikel hier nicht mehr geändert werden. Fortfahren?';
   if (!(await askConfirm(question, openPicks ? 'Aktualisieren' : 'Erstellen'))) return;
 
@@ -444,11 +448,11 @@ async function requestPick() {
     const pending = data.task?.pendingPickLines || 0;
     const pickNos = data.task?.openPickNos || '';
     const missing = lines.filter(l => !l.locked && (l.pickState === 'noStock' || l.pickState === 'partialStock'))
-      .map(l => `${l.no} (Bestand ${l.location}: ${l.stock})`);
+      .map(l => `${l.no} (frei ${l.location}: ${l.stock})`);
     if (!pickNos)
-      showToast(`Es wurde keine Lagerkommissionierung erstellt, weil am Lagerort Bestand fehlt: ${missing.join(', ')}. Bitte wende dich an das Lager.`, 'error');
+      showToast(`Es wurde keine Lagerkommissionierung erstellt, weil am Lagerort freier Bestand fehlt: ${missing.join(', ')}. Bitte wende dich an das Lager.`, 'error');
     else if (missing.length)
-      showToast(`Lagerkommissionierung ${pickNos}: Wegen fehlendem Bestand nicht übernommen: ${missing.join(', ')}. Bitte wende dich an das Lager.`, 'error');
+      showToast(`Lagerkommissionierung ${pickNos}: Wegen fehlendem freien Bestand nicht übernommen: ${missing.join(', ')}. Bitte wende dich an das Lager.`, 'error');
     else if (pending > 0)
       showToast(`Lagerkommissionierung ${pickNos}: ${pending} Artikel konnten nicht übernommen werden. Bitte wende dich an das Lager.`, 'error');
     else
@@ -550,9 +554,9 @@ function renderLines() {
         ${lines.map((l, i) => {
           let status = 'gespeichert';
           if (l.pickState === 'noStock')
-            status = `<span style="color:var(--warn)">⚠ kein Bestand am Lagerort ${esc(l.location)} – nicht auf Lagerkomm.</span>`;
+            status = `<span style="color:var(--warn)">⚠ kein freier Bestand am Lagerort ${esc(l.location)} – nicht auf Lagerkomm.</span>`;
           else if (l.pickState === 'partialStock')
-            status = `<span style="color:var(--warn)">⚠ nur ${esc(l.stock)} Stk. Bestand am Lagerort ${esc(l.location)} – nicht auf Lagerkomm.</span>`;
+            status = `<span style="color:var(--warn)">⚠ nur ${esc(l.stock)} Stk. frei am Lagerort ${esc(l.location)} – nicht auf Lagerkomm.</span>`;
           else if (l.pickState === 'pending')
             status = currentTask?.pickAllowed ? 'gespeichert, noch nicht auf Lagerkomm.' : 'gespeichert, kommt mit der ersten Lagerkomm.';
           if (l.locked) status = `🔒 ${esc(LOCK_TEXT[l.lockReason] || 'gesperrt')}`;
